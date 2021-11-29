@@ -74,6 +74,7 @@ env.Append(
     ],
 
     LINKFLAGS=[
+        "-march=rv32imc",
         "-nostartfiles",
         "-march=rv32imc",
         "--specs=nosys.specs",
