@@ -31,6 +31,8 @@ static const char * _err2str(uint8_t _error){
         return ("Bad Argument");
     } else if(_error == UPDATE_ERROR_ABORT){
         return ("Aborted");
+    } else if(_error == UPDATE_ERROR_SIGN){
+        return ("Signature verification failed");
     }
     return ("UNKNOWN");
 }
@@ -67,6 +69,8 @@ UpdateClass::UpdateClass()
 , _paroffset(0)
 , _command(U_FLASH)
 , _partition(NULL)
+, _hash(NULL)
+, _verify(NULL)
 {
 }
 
@@ -215,7 +219,9 @@ bool UpdateClass::_writeBuffer(){
     if(!_progress && _command == U_FLASH){
         _buffer[0] = ESP_IMAGE_HEADER_MAGIC;
     }
-    _md5.add(_buffer, _bufferLen);
+    if (! _verify) {
+        _md5.add(_buffer, _bufferLen);
+    }
     _progress += _bufferLen;
     _bufferLen = 0;
     if (_progress_callback) {
@@ -284,8 +290,87 @@ bool UpdateClass::end(bool evenIfRemaining){
         _size = progress();
     }
 
-    _md5.calculate();
-    if(_target_md5.length()) {
+    if (_verify) {
+        const esp_partition_t* _partition;
+        uint32_t sigLen = 0;
+
+        // Find start address of OTA partition used
+        //   - fw is just stored there, the partition hasn't been marked as 'boot'
+        //     so the function should return it.
+        //   - this is the same API UpdaterClass uses internally
+        _partition = esp_ota_get_next_update_partition(NULL);
+
+        // Read the signature length,
+        //  - this is a uint432_t at the end of the fw image
+        //  - need to do more math with ENCRYPTED_BLOCK_SIZE to support encrypted
+        //    partition use... out of scope?
+        // ESP.flashRead(_startAddress + _size - sizeof(uint32_t), &sigLen, sizeof(uint32_t));
+        ESP.partitionRead(_partition, _size - sizeof(uint32_t), &sigLen, sizeof(uint32_t));
+      
+        Serial.printf_P(PSTR("[Updater] sigLen: %d\n"), sigLen);
+      
+        // is the expected length?
+        //if (sigLen != _verify->length()) {
+        //  _error = UPDATE_ERROR_SIGN;
+        //   _reset();
+        //  return false;
+        //}
+
+        uint32_t binSize = _size - sigLen - sizeof(uint32_t) /* The siglen word */;
+
+        _hash->begin();
+        Serial.printf_P(PSTR("[Updater] Adjusted binsize: %d\n"), binSize);
+
+        // Calculate the hash of the fw image
+        uint8_t buff[128] __attribute__((aligned(4)));
+        for(int i = 0; i < binSize; i += sizeof(buff)) {
+          size_t _read = std::min(sizeof(buff), binSize - i);
+          ESP.partitionRead(_partition, i, (uint32_t*)buff, _read);
+          // ESP.flashRead(_startAddress + i, (uint32_t *)buff, sizeof(buff));
+          // size_t read = std::min((int)sizeof(buff), binSize - i);
+          _hash->add(buff, _read);
+        }
+        _hash->end();
+
+      // #ifdef DEBUG_UPDATER
+      //   unsigned char *ret = (unsigned char *)_hash->hash();
+      //   DEBUG_UPDATER.printf_P(PSTR("[Updater] Computed Hash:"));
+      //   for (int i=0; i<_hash->len(); i++) DEBUG_UPDATER.printf(" %02x", ret[i]);
+      //   DEBUG_UPDATER.printf("\n");
+      // #endif
+
+        // Read signature after the fw
+        uint8_t *sig = (uint8_t*)malloc(sigLen);
+        if (!sig) {
+          _error = UPDATE_ERROR_SIGN;
+          _reset();
+          return false;
+        }
+        ESP.partitionRead(_partition, binSize, (uint32_t*)sig, sigLen);
+        // ESP.flashRead(_startAddress + binSize, sig, sigLen);
+      // #ifdef DEBUG_UPDATER
+      //   DEBUG_UPDATER.printf_P(PSTR("[Updater] Received Signature:"));
+      //   for (size_t i=0; i<sigLen; i++) {
+      //     DEBUG_UPDATER.printf(" %02x", sig[i]);
+      //   }
+      //   DEBUG_UPDATER.printf("\n");
+      // #endif
+
+        // Verify the calculated hash matches the one in the signature
+        if (!_verify->verify(_hash, sig, sigLen)) {
+          free(sig);
+          _error = UPDATE_ERROR_SIGN;
+           _reset();
+          return false;
+        }
+        free(sig);
+        // We couldn't care less for this....
+        _size = binSize; // Adjust size to remove signature, not part of bin payload
+
+        Serial.printf_P(PSTR("[Updater] Signature matches\n"));
+
+    } else if(_target_md5.length()) {
+        _md5.calculate();
         if(_target_md5 != _md5.toString()){
             _abort(UPDATE_ERROR_MD5);
             return false;

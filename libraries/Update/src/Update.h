@@ -19,6 +19,7 @@
 #define UPDATE_ERROR_NO_PARTITION       (10)
 #define UPDATE_ERROR_BAD_ARGUMENT       (11)
 #define UPDATE_ERROR_ABORT              (12)
+#define UPDATE_ERROR_SIGN               (112)
 
 #define UPDATE_SIZE_UNKNOWN 0xFFFFFFFF
 
@@ -27,6 +28,24 @@
 #define U_AUTH    200
 
 #define ENCRYPTED_BLOCK_SIZE 16
+
+// Abstract class to implement whatever signing hash desired
+class UpdaterHashClass {
+  public:
+    virtual void begin() = 0;
+    virtual void add(const void *data, uint32_t len) = 0;
+    virtual void end() = 0;
+    virtual int len() = 0;
+    virtual const void *hash() = 0;
+    virtual const unsigned char *oid() = 0;
+};
+
+// Abstract class to implement a signature verifier
+class UpdaterVerifyClass {
+  public:
+    // virtual uint32_t length() = 0; // How many bytes of signature are expected
+    virtual bool verify(UpdaterHashClass *hash, const uint8_t *signature, uint32_t signatureLen) = 0; // Verify, return "true" on success
+};
 
 class UpdateClass {
   public:
@@ -38,6 +57,9 @@ class UpdateClass {
       This callback will be called when Update is receiving data
     */
     UpdateClass& onProgress(THandlerFunction_Progress fn);
+
+    /* Optionally add a cryptographic signature verification hash and method */
+    void installSignature(UpdaterHashClass *hash, UpdaterVerifyClass *verify) {  _hash = hash;  _verify = verify; }
 
     /*
       Call this to check the space needed for the update
@@ -184,6 +206,10 @@ class UpdateClass {
 
     int _ledPin;
     uint8_t _ledOn;
+
+    // Optional signed binary verification
+    UpdaterHashClass *_hash = nullptr;
+    UpdaterVerifyClass *_verify = nullptr;
 };
 
 extern UpdateClass Update;
